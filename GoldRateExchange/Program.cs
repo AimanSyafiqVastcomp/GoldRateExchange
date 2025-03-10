@@ -5,6 +5,7 @@ namespace GoldRatesExtractor
 {
     static class Program
     {
+
         [STAThread]
         static void Main()
         {
