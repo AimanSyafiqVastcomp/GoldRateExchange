@@ -30,9 +30,30 @@ namespace GoldRatesExtractor
                 Directory.CreateDirectory(logDirectory);
             }
 
-            // Set log file paths
-            logFilePath = Path.Combine(logDirectory, $"GoldRates_Log_{DateTime.Now:yyyyMMdd}.txt");
-            errorLogFilePath = Path.Combine(logDirectory, $"GoldRates_Error_{DateTime.Now:yyyyMMdd}.txt");
+            // Set log file paths with more specific naming that includes hour
+            logFilePath = Path.Combine(logDirectory, $"GoldRates_Log_{DateTime.Now:yyyyMMdd}.log");
+            errorLogFilePath = Path.Combine(logDirectory, $"GoldRates_Error_{DateTime.Now:yyyyMMdd}.log");
+
+            // Add a divider in the log file to separate runs
+            string divider = new string('-', 80);
+            File.AppendAllText(logFilePath,
+                Environment.NewLine +
+                divider +
+                Environment.NewLine +
+                $"New extraction run started at {DateTime.Now:yyyy-MM-dd HH:mm:ss}" +
+                Environment.NewLine +
+                divider +
+                Environment.NewLine);
+
+            // Add a divider in the error log file too
+            File.AppendAllText(errorLogFilePath,
+                Environment.NewLine +
+                divider +
+                Environment.NewLine +
+                $"New extraction run started at {DateTime.Now:yyyy-MM-dd HH:mm:ss}" +
+                Environment.NewLine +
+                divider +
+                Environment.NewLine);
         }
 
         public async Task StartAsync()
@@ -55,7 +76,6 @@ namespace GoldRatesExtractor
             }
             finally
             {
-                // Clean up
                 if (driver != null)
                 {
                     driver.Quit();
@@ -150,7 +170,7 @@ namespace GoldRatesExtractor
                         LogError($"Failed to extract data from {currentCompanyName}");
                     }
                 }
-                else
+                else if (websiteOption == 2)
                 {
                     url = ConfigurationManager.AppSettings["UrlOption2"];
                     currentCompanyName = ConfigurationManager.AppSettings["CompanyName2"];
@@ -168,6 +188,10 @@ namespace GoldRatesExtractor
                     {
                         LogError($"Failed to extract data from {currentCompanyName}");
                     }
+                }
+                else
+                {
+                    LogError($"Selected website option is not 1 or 2");
                 }
             }
             catch (Exception ex)
@@ -215,7 +239,7 @@ namespace GoldRatesExtractor
                 extractedData.Columns.Add("WeSell", typeof(decimal));
 
                 // Wait a bit longer for dynamic content to load
-                await Task.Delay(5000);
+                await Task.Delay(500);
 
                 // Find all tables on the page
                 var tableElements = driver.FindElements(By.TagName("table"));
@@ -366,8 +390,7 @@ namespace GoldRatesExtractor
 
                 LogToFile($"Extracted {extractedData.Rows.Count} gold rates.");
 
-                // Clear existing data and save to database
-                await ClearExistingCompanyDataAsync(currentCompanyName);
+                // Save to database (no clearing - rely on stored procedure to update)
                 await SaveTTTBullionDataAsync(extractedData);
                 return true;
             }
@@ -544,7 +567,7 @@ namespace GoldRatesExtractor
                 // If we found at least one type of data, save it
                 if (foundOurRatesData || foundCustomerSellData)
                 {
-                    await ClearExistingCompanyDataAsync(currentCompanyName);
+                    // Save without clearing - rely on stored procedure to update
                     await SaveMSGoldDataAsync(ourRatesData, customerSellData);
                     return true;
                 }
@@ -576,41 +599,6 @@ namespace GoldRatesExtractor
                 return "USD / MYR";
             else
                 return detail; // Return as-is if no match
-        }
-
-        private async Task ClearExistingCompanyDataAsync(string companyName)
-        {
-            try
-            {
-                using (SqlConnection connection = new SqlConnection(connectionString))
-                {
-                    await connection.OpenAsync();
-
-                    using (SqlCommand command = new SqlCommand())
-                    {
-                        command.Connection = connection;
-
-                        if (companyName == "TTTBullion")
-                        {
-                            LogToFile("Clearing existing TTTBullion data...");
-                            command.CommandText = "DELETE FROM TTTBullion_GoldRates";
-                        }
-                        else if (companyName == "MSGold")
-                        {
-                            LogToFile("Clearing existing MSGold data...");
-                            command.CommandText = "DELETE FROM MSGold_OurRates; DELETE FROM MSGold_CustomerSell;";
-                        }
-
-                        await command.ExecuteNonQueryAsync();
-                        LogToFile($"Existing {companyName} data cleared successfully.");
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                LogError($"Error clearing existing data: {ex.Message}");
-                throw;
-            }
         }
 
         private async Task SaveTTTBullionDataAsync(DataTable data)
@@ -646,7 +634,7 @@ namespace GoldRatesExtractor
 
                             await command.ExecuteNonQueryAsync();
                             rowsSaved++;
-                            LogToFile($"Saved gold rate for {detailName}");
+                            LogToFile($"Updated/Saved gold rate for {detailName}");
                         }
                     }
 
@@ -693,7 +681,7 @@ namespace GoldRatesExtractor
 
                             await command.ExecuteNonQueryAsync();
                             ourRatesSaved++;
-                            LogToFile($"Saved OurRates data for {detailName}");
+                            LogToFile($"Updated/Saved OurRates data for {detailName}");
                         }
                     }
 
@@ -718,7 +706,7 @@ namespace GoldRatesExtractor
 
                             await command.ExecuteNonQueryAsync();
                             customerSellSaved++;
-                            LogToFile($"Saved CustomerSell data for {detailName}");
+                            LogToFile($"Updated/Saved CustomerSell data for {detailName}");
                         }
                     }
 
@@ -737,6 +725,8 @@ namespace GoldRatesExtractor
             try
             {
                 string logMessage = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} - {message}";
+
+                // Ensure we append to the file, not overwrite it
                 File.AppendAllText(logFilePath, logMessage + Environment.NewLine);
 
                 // Also output to console for visibility when running manually
@@ -753,6 +743,8 @@ namespace GoldRatesExtractor
             try
             {
                 string logMessage = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} - ERROR: {errorMessage}";
+
+                // Ensure we append to the error file, not overwrite it
                 File.AppendAllText(errorLogFilePath, logMessage + Environment.NewLine);
 
                 // Also log to the regular log file
