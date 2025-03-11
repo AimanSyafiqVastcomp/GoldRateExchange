@@ -2,28 +2,68 @@
 using System.Collections.Generic;
 using System.Data;
 using System.Data.SqlClient;
-using System.IO; 
-using System.Linq;
+using System.IO;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
-using System.Windows.Forms;
+using System.Configuration;
 using OpenQA.Selenium;
 using OpenQA.Selenium.Chrome;
 using OpenQA.Selenium.Support.UI;
 
 namespace GoldRatesExtractor
 {
-    public partial class MainForm : Form
+    public class GoldRatesExtractor
     {
         private string connectionString;
         private string currentCompanyName;
         private ChromeDriver driver;
+        private string logFilePath;
+        private string errorLogFilePath;
+        private int websiteOption;
 
-        public MainForm()
+        public GoldRatesExtractor()
         {
-            InitializeComponent();
-            LoadConfiguration();
-            InitializeSelenium();
+            // Create log directory if it doesn't exist
+            string logDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Logs");
+            if (!Directory.Exists(logDirectory))
+            {
+                Directory.CreateDirectory(logDirectory);
+            }
+
+            // Set log file paths
+            logFilePath = Path.Combine(logDirectory, $"GoldRates_Log_{DateTime.Now:yyyyMMdd}.txt");
+            errorLogFilePath = Path.Combine(logDirectory, $"GoldRates_Error_{DateTime.Now:yyyyMMdd}.txt");
+        }
+
+        public async Task StartAsync()
+        {
+            LogToFile("Starting Gold Rates Extractor");
+
+            try
+            {
+                // Load configuration
+                LoadConfiguration();
+                InitializeSelenium();
+
+                // Run extraction process
+                await ExtractGoldRatesAsync();
+            }
+            catch (Exception ex)
+            {
+                LogError($"Error during startup: {ex.Message}");
+                LogError($"Stack trace: {ex.StackTrace}");
+            }
+            finally
+            {
+                // Clean up
+                if (driver != null)
+                {
+                    driver.Quit();
+                    driver.Dispose();
+                }
+
+                LogToFile("Gold Rates Extractor completed");
+            }
         }
 
         private void InitializeSelenium()
@@ -33,27 +73,17 @@ namespace GoldRatesExtractor
                 var options = new ChromeOptions();
                 options.AddArgument("--headless"); // Run Chrome in headless mode (no UI)
                 options.AddArgument("--disable-gpu");
-                options.AddArgument("--window-size=1920,1080");
+                options.AddArgument("--log-level=3");
+                ChromeDriverService service = ChromeDriverService.CreateDefaultService();
+                service.HideCommandPromptWindow = true;
 
-                driver = new ChromeDriver(options);
-                statusTextBox.Text = "Selenium initialized successfully.";
+                driver = new ChromeDriver(service, options);
+                LogToFile("Selenium initialized successfully");
             }
             catch (Exception ex)
             {
-                statusTextBox.Text = $"Error initializing Selenium: {ex.Message}";
-                MessageBox.Show($"Error initializing Selenium: {ex.Message}\n\nMake sure you have ChromeDriver installed and in your PATH.",
-                    "Selenium Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-        }
-
-        protected override void OnFormClosing(FormClosingEventArgs e)
-        {
-            base.OnFormClosing(e);
-
-            if (driver != null)
-            {
-                driver.Quit();
-                driver.Dispose();
+                LogError($"Error initializing Selenium: {ex.Message}");
+                throw; // Re-throw to handle at higher level
             }
         }
 
@@ -62,102 +92,119 @@ namespace GoldRatesExtractor
             try
             {
                 // Load connection string from app.config
-                connectionString = System.Configuration.ConfigurationManager.AppSettings["ConnectionString"];
+                connectionString = ConfigurationManager.AppSettings["ConnectionString"];
 
-                // Populate the website combo box
-                cboWebsite.Items.Add($"1: {System.Configuration.ConfigurationManager.AppSettings["CompanyName1"]} - {System.Configuration.ConfigurationManager.AppSettings["UrlOption1"]}");
-                cboWebsite.Items.Add($"2: {System.Configuration.ConfigurationManager.AppSettings["CompanyName2"]} - {System.Configuration.ConfigurationManager.AppSettings["UrlOption2"]}");
-                cboWebsite.SelectedIndex = 0; // Default to first option
+                // Get the website option from app.config
+                string websiteOptionStr = ConfigurationManager.AppSettings["WebsiteOption"];
+                if (!int.TryParse(websiteOptionStr, out websiteOption))
+                {
+                    // Default to option 1 if parsing fails
+                    websiteOption = 1;
+                    LogToFile("WebsiteOption not specified or invalid in app.config. Defaulting to 1 (TTTBullion)");
+                }
+                else
+                {
+                    LogToFile($"Using WebsiteOption {websiteOption} from app.config");
+                }
+
+                LogToFile("Configuration loaded successfully");
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Error loading configuration: {ex.Message}", "Configuration Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                LogError($"Error loading configuration: {ex.Message}");
+                throw; // Re-throw to handle at higher level
             }
         }
 
-        private async void btnExtract_Click(object sender, EventArgs e)
+        private async Task ExtractGoldRatesAsync()
         {
-            if (driver == null)
-            {
-                MessageBox.Show("Selenium WebDriver is not initialized. Cannot proceed.", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return;
-            }
+            LogToFile("Starting gold rates extraction process");
 
             try
             {
-                // Disable the button during extraction
-                btnExtract.Enabled = false;
-                statusTextBox.Text = "Starting extraction process...";
+                if (driver == null)
+                {
+                    LogError("Selenium WebDriver is not initialized. Re-initializing...");
+                    InitializeSelenium();
+                }
 
-                // Determine which website was selected
-                int selectedIndex = cboWebsite.SelectedIndex;
+                // Determine which website to use based on configuration
                 string url;
 
-                if (selectedIndex == 0)
+                if (websiteOption == 1)
                 {
-                    url = System.Configuration.ConfigurationManager.AppSettings["UrlOption1"];
-                    currentCompanyName = System.Configuration.ConfigurationManager.AppSettings["CompanyName1"];
+                    url = ConfigurationManager.AppSettings["UrlOption1"];
+                    currentCompanyName = ConfigurationManager.AppSettings["CompanyName1"];
+                    LogToFile($"Using Option 1: {currentCompanyName} at {url}");
+
+                    // Navigate to URL and process
+                    await LoadWebpageAsync(url);
+                    bool success = await ProcessTTTBullionPageAsync();
+
+                    if (success)
+                    {
+                        LogToFile($"Successfully extracted and saved data from {currentCompanyName}");
+                    }
+                    else
+                    {
+                        LogError($"Failed to extract data from {currentCompanyName}");
+                    }
                 }
                 else
                 {
-                    url = System.Configuration.ConfigurationManager.AppSettings["UrlOption2"];
-                    currentCompanyName = System.Configuration.ConfigurationManager.AppSettings["CompanyName2"];
-                }
+                    url = ConfigurationManager.AppSettings["UrlOption2"];
+                    currentCompanyName = ConfigurationManager.AppSettings["CompanyName2"];
+                    LogToFile($"Using Option 2: {currentCompanyName} at {url}");
 
-                // Navigate to the URL and wait for JavaScript to load content
-                await LoadWebpageAsync(url);
+                    // Navigate to URL and process
+                    await LoadWebpageAsync(url);
+                    bool success = await ProcessMSGoldPageAsync();
 
-                // Process the page based on the selected website
-                bool success;
-                if (selectedIndex == 0)
-                {
-                    success = await ProcessTTTBullionPageAsync();
-                }
-                else
-                {
-                    success = await ProcessMSGoldPageAsync();
-                }
-
-                if (!success)
-                {
-                    MessageBox.Show($"Unable to extract data from {currentCompanyName}. No data was saved to the database.",
-                        "Extraction Failed", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    if (success)
+                    {
+                        LogToFile($"Successfully extracted and saved data from {currentCompanyName}");
+                    }
+                    else
+                    {
+                        LogError($"Failed to extract data from {currentCompanyName}");
+                    }
                 }
             }
             catch (Exception ex)
             {
-                statusTextBox.Text += Environment.NewLine + $"Error: {ex.Message}";
-                statusTextBox.Text += Environment.NewLine + $"Stack trace: {ex.StackTrace}";
-                MessageBox.Show($"An error occurred: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-            finally
-            {
-                // Re-enable the button
-                btnExtract.Enabled = true;
+                LogError($"Critical error in extraction process: {ex.Message}");
+                LogError($"Stack trace: {ex.StackTrace}");
             }
         }
 
         private async Task LoadWebpageAsync(string url)
         {
-            statusTextBox.Text += Environment.NewLine + $"Loading webpage: {url}";
+            LogToFile($"Loading webpage: {url}");
 
             await Task.Run(() => {
-                driver.Navigate().GoToUrl(url);
+                try
+                {
+                    driver.Navigate().GoToUrl(url);
 
-                // Wait for page to load
-                var wait = new WebDriverWait(driver, TimeSpan.FromSeconds(10));
-                wait.Until(d => ((IJavaScriptExecutor)d).ExecuteScript("return document.readyState").Equals("complete"));
+                    // Wait for page to load
+                    var wait = new WebDriverWait(driver, TimeSpan.FromSeconds(15));
+                    wait.Until(d => ((IJavaScriptExecutor)d).ExecuteScript("return document.readyState").Equals("complete"));
 
-                // Additional wait for any AJAX calls to complete
-                System.Threading.Thread.Sleep(2000);
+                    // Additional wait for any AJAX calls to complete
+                    System.Threading.Thread.Sleep(3000);
+                    LogToFile("Page loaded successfully");
+                }
+                catch (Exception ex)
+                {
+                    LogError($"Error loading webpage: {ex.Message}");
+                    throw;
+                }
             });
-
-            statusTextBox.Text += Environment.NewLine + "Page loaded successfully";
         }
 
         private async Task<bool> ProcessTTTBullionPageAsync()
         {
-            statusTextBox.Text += Environment.NewLine + "Processing TTT Bullion page...";
+            LogToFile("Processing TTT Bullion page...");
 
             try
             {
@@ -173,7 +220,7 @@ namespace GoldRatesExtractor
                 // Find all tables on the page
                 var tableElements = driver.FindElements(By.TagName("table"));
                 int tableCount = tableElements.Count;
-                statusTextBox.Text += Environment.NewLine + $"Found {tableCount} tables on the page";
+                LogToFile($"Found {tableCount} tables on the page");
 
                 // We only want the first table (Gold rates), not the silver rates
                 if (tableCount > 0)
@@ -184,12 +231,12 @@ namespace GoldRatesExtractor
                     // Check if this is indeed the gold table
                     if (tableText.Contains("Gold") && !tableText.Contains("Silver"))
                     {
-                        statusTextBox.Text += Environment.NewLine + "Processing Gold rates table";
+                        LogToFile("Processing Gold rates table");
 
                         // Get all rows in the table
                         var rows = goldTable.FindElements(By.TagName("tr"));
                         int rowCount = rows.Count;
-                        statusTextBox.Text += Environment.NewLine + $"Gold table has {rowCount} rows";
+                        LogToFile($"Gold table has {rowCount} rows");
 
                         // Skip the header row, process the data rows
                         for (int i = 1; i < rowCount; i++) // Start at 1 to skip header
@@ -204,8 +251,7 @@ namespace GoldRatesExtractor
                                 string weSellStr = cells[2].Text.Trim();
 
                                 // Log what we found
-                                statusTextBox.Text += Environment.NewLine +
-                                    $"Gold data - Detail: '{detail}', Buy: '{weBuyStr}', Sell: '{weSellStr}'";
+                                LogToFile($"Gold data - Detail: '{detail}', Buy: '{weBuyStr}', Sell: '{weSellStr}'");
 
                                 // Try to extract numeric values
                                 if (!string.IsNullOrEmpty(weBuyStr) && !string.IsNullOrEmpty(weSellStr))
@@ -222,12 +268,11 @@ namespace GoldRatesExtractor
 
                                             // No need to normalize the name - it's already in the correct format
                                             extractedData.Rows.Add(detail, weBuy, weSell);
-                                            statusTextBox.Text += Environment.NewLine +
-                                                $"Extracted gold rate: {detail}, Buy: {weBuy}, Sell: {weSell}";
+                                            LogToFile($"Extracted gold rate: {detail}, Buy: {weBuy}, Sell: {weSell}");
                                         }
                                         catch (Exception ex)
                                         {
-                                            statusTextBox.Text += Environment.NewLine + $"Error parsing values: {ex.Message}";
+                                            LogError($"Error parsing values: {ex.Message}");
                                         }
                                     }
                                 }
@@ -236,7 +281,7 @@ namespace GoldRatesExtractor
                     }
                     else
                     {
-                        statusTextBox.Text += Environment.NewLine + "First table doesn't appear to be the Gold rates table. Checking all tables...";
+                        LogToFile("First table doesn't appear to be the Gold rates table. Checking all tables...");
 
                         // If the first table wasn't the gold table, search through all tables
                         bool foundGoldTable = false;
@@ -249,7 +294,7 @@ namespace GoldRatesExtractor
                             // Check if this table contains gold rates
                             if (tblText.Contains("Gold") && !tblText.Contains("Silver"))
                             {
-                                statusTextBox.Text += Environment.NewLine + $"Found Gold rates in table {tableIndex}";
+                                LogToFile($"Found Gold rates in table {tableIndex}");
 
                                 var rows = table.FindElements(By.TagName("tr"));
                                 foreach (var row in rows)
@@ -266,8 +311,7 @@ namespace GoldRatesExtractor
                                         string weBuyStr = cells[1].Text.Trim();
                                         string weSellStr = cells[2].Text.Trim();
 
-                                        statusTextBox.Text += Environment.NewLine +
-                                            $"Gold data - Detail: '{detail}', Buy: '{weBuyStr}', Sell: '{weSellStr}'";
+                                        LogToFile($"Gold data - Detail: '{detail}', Buy: '{weBuyStr}', Sell: '{weSellStr}'");
 
                                         if (!string.IsNullOrEmpty(weBuyStr) && !string.IsNullOrEmpty(weSellStr))
                                         {
@@ -282,13 +326,12 @@ namespace GoldRatesExtractor
                                                     decimal weSell = decimal.Parse(weSellMatch.Value, System.Globalization.NumberStyles.Any);
 
                                                     extractedData.Rows.Add(detail, weBuy, weSell);
-                                                    statusTextBox.Text += Environment.NewLine +
-                                                        $"Extracted gold rate: {detail}, Buy: {weBuy}, Sell: {weSell}";
+                                                    LogToFile($"Extracted gold rate: {detail}, Buy: {weBuy}, Sell: {weSell}");
                                                     foundGoldTable = true;
                                                 }
                                                 catch (Exception ex)
                                                 {
-                                                    statusTextBox.Text += Environment.NewLine + $"Error parsing values: {ex.Message}";
+                                                    LogError($"Error parsing values: {ex.Message}");
                                                 }
                                             }
                                         }
@@ -303,25 +346,25 @@ namespace GoldRatesExtractor
 
                         if (!foundGoldTable)
                         {
-                            statusTextBox.Text += Environment.NewLine + "Could not identify a Gold rates table on the page.";
+                            LogToFile("Could not identify a Gold rates table on the page.");
                             return false;
                         }
                     }
                 }
                 else
                 {
-                    statusTextBox.Text += Environment.NewLine + "No tables found on the page.";
+                    LogToFile("No tables found on the page.");
                     return false;
                 }
 
                 // Check if we found any data
                 if (extractedData.Rows.Count == 0)
                 {
-                    statusTextBox.Text += Environment.NewLine + "No gold rate data extracted.";
+                    LogToFile("No gold rate data extracted.");
                     return false;
                 }
 
-                statusTextBox.Text += Environment.NewLine + $"Extracted {extractedData.Rows.Count} gold rates.";
+                LogToFile($"Extracted {extractedData.Rows.Count} gold rates.");
 
                 // Clear existing data and save to database
                 await ClearExistingCompanyDataAsync(currentCompanyName);
@@ -330,17 +373,15 @@ namespace GoldRatesExtractor
             }
             catch (Exception ex)
             {
-                statusTextBox.Text += Environment.NewLine + $"Error processing TTT Bullion page: {ex.Message}";
-                statusTextBox.Text += Environment.NewLine + $"Stack trace: {ex.StackTrace}";
+                LogError($"Error processing TTT Bullion page: {ex.Message}");
+                LogError($"Stack trace: {ex.StackTrace}");
                 return false;
             }
         }
 
-        
-
         private async Task<bool> ProcessMSGoldPageAsync()
         {
-            statusTextBox.Text += Environment.NewLine + "Processing MS Gold page...";
+            LogToFile("Processing MS Gold page...");
 
             try
             {
@@ -359,7 +400,7 @@ namespace GoldRatesExtractor
 
                 // Find all tables on the page
                 var tableElements = driver.FindElements(By.TagName("table"));
-                statusTextBox.Text += Environment.NewLine + $"Found {tableElements.Count} tables on the page";
+                LogToFile($"Found {tableElements.Count} tables on the page");
 
                 bool foundOurRatesData = false;
                 bool foundCustomerSellData = false;
@@ -369,15 +410,15 @@ namespace GoldRatesExtractor
                 {
                     var table = tableElements[i];
                     string tableText = table.Text;
-                    statusTextBox.Text += Environment.NewLine + $"Table {i} text: {tableText.Substring(0, Math.Min(100, tableText.Length))}...";
+                    LogToFile($"Table {i} text: {tableText.Substring(0, Math.Min(100, tableText.Length))}...");
 
                     // Look for our rates table (usually has 3 columns including Buy and Sell)
                     if (tableText.Contains("WE BUY") && tableText.Contains("WE SELL"))
                     {
-                        statusTextBox.Text += Environment.NewLine + $"Found OurRates table (index {i})";
+                        LogToFile($"Found OurRates table (index {i})");
 
                         var rows = table.FindElements(By.TagName("tr"));
-                        statusTextBox.Text += Environment.NewLine + $"Table has {rows.Count} rows";
+                        LogToFile($"Table has {rows.Count} rows");
 
                         foreach (var row in rows)
                         {
@@ -394,7 +435,7 @@ namespace GoldRatesExtractor
                                 string weSellStr = cells[2].Text.Trim();
 
                                 // Log raw values
-                                statusTextBox.Text += Environment.NewLine + $"Raw values - Detail: '{detail}', Buy: '{weBuyStr}', Sell: '{weSellStr}'";
+                                LogToFile($"Raw values - Detail: '{detail}', Buy: '{weBuyStr}', Sell: '{weSellStr}'");
 
                                 // Extract numeric values
                                 var weBuyMatch = Regex.Match(weBuyStr, @"[\d,\.]+");
@@ -411,17 +452,17 @@ namespace GoldRatesExtractor
                                         string normalizedDetail = GetMSGoldDetailName(detail);
 
                                         ourRatesData.Rows.Add(normalizedDetail, weBuy, weSell, "OurRates");
-                                        statusTextBox.Text += Environment.NewLine + $"Extracted OurRates: {normalizedDetail}, Buy: {weBuy}, Sell: {weSell}";
+                                        LogToFile($"Extracted OurRates: {normalizedDetail}, Buy: {weBuy}, Sell: {weSell}");
                                         foundOurRatesData = true;
                                     }
                                     catch (Exception ex)
                                     {
-                                        statusTextBox.Text += Environment.NewLine + $"Error parsing values: {ex.Message}";
+                                        LogError($"Error parsing values: {ex.Message}");
                                     }
                                 }
                                 else
                                 {
-                                    statusTextBox.Text += Environment.NewLine + $"Failed to extract numeric values";
+                                    LogToFile($"Failed to extract numeric values");
                                 }
                             }
                         }
@@ -429,10 +470,10 @@ namespace GoldRatesExtractor
                     // Look for customer sell table (usually has 2 columns)
                     else if (tableText.Contains("WE BUY") && !tableText.Contains("WE SELL"))
                     {
-                        statusTextBox.Text += Environment.NewLine + $"Found CustomerSell table (index {i})";
+                        LogToFile($"Found CustomerSell table (index {i})");
 
                         var rows = table.FindElements(By.TagName("tr"));
-                        statusTextBox.Text += Environment.NewLine + $"Table has {rows.Count} rows";
+                        LogToFile($"Table has {rows.Count} rows");
 
                         foreach (var row in rows)
                         {
@@ -448,7 +489,7 @@ namespace GoldRatesExtractor
                                 string weBuyStr = cells[1].Text.Trim();
 
                                 // Log raw values
-                                statusTextBox.Text += Environment.NewLine + $"Raw CustomerSell values - Detail: '{detail}', Buy: '{weBuyStr}'";
+                                LogToFile($"Raw CustomerSell values - Detail: '{detail}', Buy: '{weBuyStr}'");
 
                                 // Extract numeric values
                                 var weBuyMatch = Regex.Match(weBuyStr, @"[\d,\.]+");
@@ -482,18 +523,18 @@ namespace GoldRatesExtractor
                                             string normalizedDetail = $"{purity} MYR / Gram";
 
                                             customerSellData.Rows.Add(normalizedDetail, weBuy, null, "CustomerSell");
-                                            statusTextBox.Text += Environment.NewLine + $"Extracted CustomerSell: {normalizedDetail}, Buy: {weBuy}";
+                                            LogToFile($"Extracted CustomerSell: {normalizedDetail}, Buy: {weBuy}");
                                             foundCustomerSellData = true;
                                         }
                                     }
                                     catch (Exception ex)
                                     {
-                                        statusTextBox.Text += Environment.NewLine + $"Error parsing values: {ex.Message}";
+                                        LogError($"Error parsing values: {ex.Message}");
                                     }
                                 }
                                 else
                                 {
-                                    statusTextBox.Text += Environment.NewLine + $"Failed to extract numeric values";
+                                    LogToFile($"Failed to extract numeric values");
                                 }
                             }
                         }
@@ -509,13 +550,13 @@ namespace GoldRatesExtractor
                 }
                 else
                 {
-                    statusTextBox.Text += Environment.NewLine + "No data was extracted.";
+                    LogToFile("No data was extracted.");
                     return false;
                 }
             }
             catch (Exception ex)
             {
-                statusTextBox.Text += Environment.NewLine + $"Error processing MS Gold page: {ex.Message}";
+                LogError($"Error processing MS Gold page: {ex.Message}");
                 return false;
             }
         }
@@ -551,37 +592,37 @@ namespace GoldRatesExtractor
 
                         if (companyName == "TTTBullion")
                         {
-                            statusTextBox.Text += Environment.NewLine + "Clearing existing TTTBullion data...";
+                            LogToFile("Clearing existing TTTBullion data...");
                             command.CommandText = "DELETE FROM TTTBullion_GoldRates";
                         }
                         else if (companyName == "MSGold")
                         {
-                            statusTextBox.Text += Environment.NewLine + "Clearing existing MSGold data...";
+                            LogToFile("Clearing existing MSGold data...");
                             command.CommandText = "DELETE FROM MSGold_OurRates; DELETE FROM MSGold_CustomerSell;";
                         }
 
                         await command.ExecuteNonQueryAsync();
-                        statusTextBox.Text += Environment.NewLine + $"Existing {companyName} data cleared successfully.";
+                        LogToFile($"Existing {companyName} data cleared successfully.");
                     }
                 }
             }
             catch (Exception ex)
             {
-                statusTextBox.Text += Environment.NewLine + $"Error clearing existing data: {ex.Message}";
+                LogError($"Error clearing existing data: {ex.Message}");
                 throw;
             }
         }
 
         private async Task SaveTTTBullionDataAsync(DataTable data)
         {
-            statusTextBox.Text += Environment.NewLine + "Saving TTT Bullion data to database...";
+            LogToFile("Saving TTT Bullion data to database...");
 
             try
             {
                 using (SqlConnection connection = new SqlConnection(connectionString))
                 {
                     await connection.OpenAsync();
-                    statusTextBox.Text += Environment.NewLine + "Connected to database.";
+                    LogToFile("Connected to database.");
 
                     int rowsSaved = 0;
 
@@ -591,41 +632,44 @@ namespace GoldRatesExtractor
                         decimal weBuy = (decimal)row["WeBuy"];
                         decimal? weSell = row["WeSell"] != DBNull.Value ? (decimal?)row["WeSell"] : null;
 
-                        
-                        using (SqlCommand command = new SqlCommand(
-                            "INSERT INTO TTTBullion_GoldRates (GoldRate_DetailName, GoldRate_WeBuy, GoldRate_WeSell, GoldRate_LastUpdated) " +
-                            "VALUES (@DetailName, @WeBuy, @WeSell, GETDATE())", connection))
+                        // Use the stored procedure instead of direct SQL
+                        using (SqlCommand command = new SqlCommand("sp_goldRates_upsert", connection))
                         {
+                            command.CommandType = CommandType.StoredProcedure;
+
+                            // Add parameters to call the stored procedure
+                            command.Parameters.AddWithValue("@CompanyName", currentCompanyName);
+                            command.Parameters.AddWithValue("@TableType", "OurRates"); // Always OurRates for gold rates
                             command.Parameters.AddWithValue("@DetailName", detailName);
                             command.Parameters.AddWithValue("@WeBuy", weBuy);
                             command.Parameters.AddWithValue("@WeSell", weSell.HasValue ? (object)weSell.Value : DBNull.Value);
 
                             await command.ExecuteNonQueryAsync();
                             rowsSaved++;
-                            statusTextBox.Text += Environment.NewLine + $"Saved data for {detailName}";
+                            LogToFile($"Saved gold rate for {detailName}");
                         }
                     }
 
-                    statusTextBox.Text += Environment.NewLine + $"Successfully saved {rowsSaved} records for TTT Bullion.";
+                    LogToFile($"Successfully saved {rowsSaved} gold rates records for TTT Bullion.");
                 }
             }
             catch (Exception ex)
             {
-                statusTextBox.Text += Environment.NewLine + $"Database error: {ex.Message}";
+                LogError($"Database error: {ex.Message}");
                 throw;
             }
         }
 
         private async Task SaveMSGoldDataAsync(DataTable ourRatesData, DataTable customerSellData)
         {
-            statusTextBox.Text += Environment.NewLine + "Saving MS Gold data to database...";
+            LogToFile("Saving MS Gold data to database...");
 
             try
             {
                 using (SqlConnection connection = new SqlConnection(connectionString))
                 {
                     await connection.OpenAsync();
-                    statusTextBox.Text += Environment.NewLine + "Connected to database.";
+                    LogToFile("Connected to database.");
 
                     // Save OurRates data
                     int ourRatesSaved = 0;
@@ -635,15 +679,21 @@ namespace GoldRatesExtractor
                         decimal weBuy = (decimal)row["WeBuy"];
                         decimal? weSell = row["WeSell"] != DBNull.Value ? (decimal?)row["WeSell"] : null;
 
-                        using (SqlCommand command = new SqlCommand("INSERT INTO MSGold_OurRates (Rate_DetailName, Rate_WeBuy, Rate_WeSell, Rate_LastUpdated) VALUES (@DetailName, @WeBuy, @WeSell, GETDATE())", connection))
+                        // Use the stored procedure instead of direct SQL
+                        using (SqlCommand command = new SqlCommand("sp_goldRates_upsert", connection))
                         {
+                            command.CommandType = CommandType.StoredProcedure;
+
+                            // Add parameters
+                            command.Parameters.AddWithValue("@CompanyName", currentCompanyName);
+                            command.Parameters.AddWithValue("@TableType", "OurRates");
                             command.Parameters.AddWithValue("@DetailName", detailName);
                             command.Parameters.AddWithValue("@WeBuy", weBuy);
                             command.Parameters.AddWithValue("@WeSell", weSell.HasValue ? (object)weSell.Value : DBNull.Value);
 
                             await command.ExecuteNonQueryAsync();
                             ourRatesSaved++;
-                            statusTextBox.Text += Environment.NewLine + $"Saved OurRates data for {detailName}";
+                            LogToFile($"Saved OurRates data for {detailName}");
                         }
                     }
 
@@ -654,24 +704,69 @@ namespace GoldRatesExtractor
                         string detailName = row["DetailName"].ToString();
                         decimal weBuy = (decimal)row["WeBuy"];
 
-                        using (SqlCommand command = new SqlCommand("INSERT INTO MSGold_CustomerSell (Customer_DetailName, Customer_WeBuy, Customer_LastUpdated) VALUES (@DetailName, @WeBuy, GETDATE())", connection))
+                        // Use the stored procedure instead of direct SQL
+                        using (SqlCommand command = new SqlCommand("sp_goldRates_upsert", connection))
                         {
+                            command.CommandType = CommandType.StoredProcedure;
+
+                            // Add parameters
+                            command.Parameters.AddWithValue("@CompanyName", currentCompanyName);
+                            command.Parameters.AddWithValue("@TableType", "CustomerSell");
                             command.Parameters.AddWithValue("@DetailName", detailName);
                             command.Parameters.AddWithValue("@WeBuy", weBuy);
+                            command.Parameters.AddWithValue("@WeSell", DBNull.Value); // CustomerSell doesn't have WeSell values
 
                             await command.ExecuteNonQueryAsync();
                             customerSellSaved++;
-                            statusTextBox.Text += Environment.NewLine + $"Saved CustomerSell data for {detailName}";
+                            LogToFile($"Saved CustomerSell data for {detailName}");
                         }
                     }
 
-                    statusTextBox.Text += Environment.NewLine + $"Successfully saved {ourRatesSaved} OurRates records and {customerSellSaved} CustomerSell records for MS Gold.";
+                    LogToFile($"Successfully saved {ourRatesSaved} OurRates records and {customerSellSaved} CustomerSell records for MS Gold.");
                 }
             }
             catch (Exception ex)
             {
-                statusTextBox.Text += Environment.NewLine + $"Database error: {ex.Message}";
+                LogError($"Database error: {ex.Message}");
                 throw;
+            }
+        }
+
+        private void LogToFile(string message)
+        {
+            try
+            {
+                string logMessage = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} - {message}";
+                File.AppendAllText(logFilePath, logMessage + Environment.NewLine);
+
+                // Also output to console for visibility when running manually
+                Console.WriteLine(logMessage);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Failed to write to log file: {ex.Message}. Original message: {message}");
+            }
+        }
+
+        private void LogError(string errorMessage)
+        {
+            try
+            {
+                string logMessage = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} - ERROR: {errorMessage}";
+                File.AppendAllText(errorLogFilePath, logMessage + Environment.NewLine);
+
+                // Also log to the regular log file
+                LogToFile($"ERROR: {errorMessage}");
+
+                // Output to console in red
+                ConsoleColor originalColor = Console.ForegroundColor;
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine(logMessage);
+                Console.ForegroundColor = originalColor;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Failed to write to error log file: {ex.Message}. Original error: {errorMessage}");
             }
         }
     }
